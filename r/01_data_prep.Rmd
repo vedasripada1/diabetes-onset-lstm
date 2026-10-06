@@ -1,0 +1,252 @@
+---
+title: "Data Prep: Predicting Type 2 Diabetes Onset from Longitudinal EHR Data in an Asian American Cohort"
+author: "Veda Sripada"
+date: "`r Sys.Date()`"
+output: pdf_document
+params:
+  data_dir: "data/raw"        # folder holding the .rdata extracts (not in this repository)
+  out_dir: "data"             # where the model-ready CSV is written
+---
+
+# Overview
+
+This file builds the model-ready longitudinal dataset used by `notebooks/diabetes_onset_lstm.ipynb`.
+
+1. Load static demographics (`sociodemo`), baseline clinical covariates (`common`), office-visit vitals (`followup_crf_office_visit_only`) and time-to-event outcomes (`ttoevent`).
+2. Exclude patients with diabetes in the lookback window.
+3. Reshape vitals to one row per patient visit and compute time since last visit.
+4. Impute missing BMI, systolic and diastolic BP with **multilevel MICE** (patient as cluster). **Outcome variables are excluded from the imputation model** so the outcome cannot leak into the features.
+5. Export one CSV for modelling.
+
+All outputs in this document are aggregate. Example trajectories use anonymised labels.
+
+```{r setup, message = FALSE}
+library(dplyr)
+library(tidyr)
+library(lubridate)
+library(ggplot2)
+library(mice)
+library(naniar)
+
+data_file = function(name) file.path(params$data_dir, name)
+```
+
+## Load data
+```{r load}
+load(data_file("followup_crf_office_visit_only.rdata"))  # dat_crf_office
+load(data_file("followup_visit_start_end.rdata"))        # dat_followup_visit_start_end
+load(data_file("ttoevent.rdata"))                        # ttoevent
+load(data_file("common.rdata"))                          # common
+load(data_file("sociodemo.rdata"))                       # sociodemo
+```
+
+# Cohort and features
+
+## Exclude prevalent diabetes
+```{r exclude}
+no_diabetes_lookback_ids = common %>%
+  filter(dm_phenotype_lookback == 0) %>%
+  pull(pat_id)
+
+dat_crf_office = dat_crf_office %>% filter(pat_id %in% no_diabetes_lookback_ids)
+ttoevent = ttoevent %>% filter(pat_id %in% no_diabetes_lookback_ids)
+```
+
+## Static features and outcome
+```{r static}
+labels = ttoevent %>%
+  select(pat_id, event_no_pheno, surv_no_pheno) %>%
+  rename(diabetes_onset = event_no_pheno)
+
+static_vars = common %>%
+  left_join(sociodemo, by = "pat_id") %>%
+  select(pat_id, age_years, sex, race_group, asian_ethnic_group, everything()) %>%
+  left_join(labels, by = "pat_id")
+```
+
+## Time-varying features
+```{r dynamic}
+tv_vars = dat_crf_office %>%
+  select(pat_id, contact_date, bmi_new, bp_systolic_new, bp_diastolic_new) %>%
+  arrange(pat_id, contact_date) %>%
+  group_by(pat_id) %>%
+  mutate(
+    time_step = row_number(),
+    time_since_last_visit = as.numeric(contact_date - lag(contact_date)),
+    time_since_last_visit = replace_na(time_since_last_visit, 0)
+  ) %>%
+  ungroup()
+
+final_long_data = tv_vars %>%
+  left_join(static_vars, by = "pat_id")
+```
+
+# Exploratory analysis
+
+## Missingness
+```{r missingness}
+final_long_data %>%
+  summarise(across(everything(), ~ sum(is.na(.)))) %>%
+  pivot_longer(everything(), names_to = "variable", values_to = "missing_count") %>%
+  mutate(missing_percent = round(100 * missing_count / nrow(final_long_data), 2)) %>%
+  arrange(desc(missing_percent))
+```
+
+## Outcome distribution
+```{r outcome}
+patient_level = final_long_data %>%
+  distinct(pat_id, diabetes_onset, asian_ethnic_group)
+
+patient_level %>%
+  count(diabetes_onset) %>%
+  mutate(percent = 100 * n / sum(n))
+
+# Groups with fewer than 11 cases are suppressed
+patient_level %>%
+  group_by(asian_ethnic_group) %>%
+  summarise(patients = n(), cases = sum(diabetes_onset, na.rm = TRUE)) %>%
+  filter(cases >= 11) %>%
+  mutate(percent = 100 * cases / patients) %>%
+  ggplot(aes(reorder(asian_ethnic_group, -percent), percent)) +
+  geom_col(fill = "#606e4c") +
+  geom_text(aes(label = sprintf("%.1f%%", percent)), vjust = -0.5, size = 3.5) +
+  labs(title = "Diabetes onset by Asian ethnic group", x = NULL, y = "Converted (%)") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+## Visit patterns
+```{r visits}
+visit_summary = final_long_data %>%
+  group_by(pat_id) %>%
+  summarise(
+    n_visits = n(),
+    mean_gap = mean(time_since_last_visit[time_step > 1]),
+    asian_ethnic_group = first(asian_ethnic_group)
+  )
+
+ggplot(visit_summary, aes(n_visits)) +
+  geom_histogram(binwidth = 2, fill = "#5c4033", color = "white") +
+  labs(title = "Office visits per patient", x = "Visits", y = "Patients") +
+  theme_minimal()
+
+ggplot(visit_summary, aes(mean_gap)) +
+  geom_histogram(binwidth = 30, fill = "#5c4033", color = "white") +
+  facet_wrap(~ asian_ethnic_group, scales = "free_y") +
+  labs(title = "Average days between visits by Asian ethnic group", x = "Days", y = "Patients") +
+  theme_minimal()
+```
+
+# Multilevel imputation (MICE)
+
+BMI, systolic BP and diastolic BP are imputed with `2l.norm`, which models visits nested within patients. Time-invariant covariates use single-level methods. `diabetes_onset` and `surv_no_pheno` are **removed as predictors** so imputed vitals do not encode the outcome.
+
+```{r mice-setup}
+imputation_data = final_long_data %>%
+  select(
+    pat_id, contact_date, time_since_last_visit, surv_no_pheno, diabetes_onset,
+    bp_systolic_new, bp_diastolic_new, bmi_new, age_years, sex, asian_ethnic_group,
+    privins_lookback, hld_phenotype_lookback, hypertens_lookback, ischhd_lookback,
+    cerebrvasd_lookback, heartfail_lookback, perivd_lookback, renald_lookback,
+    alcohol_lookback, tobacco_ever_lookback
+  ) %>%
+  mutate(
+    contact_date = as.numeric(contact_date),   # mice cannot handle Date columns
+    privins_lookback = as.factor(privins_lookback),
+    pat_id_int = as.integer(as.factor(pat_id))
+  )
+
+vis_miss(imputation_data, warn_large_data = FALSE)
+
+init = mice(imputation_data, maxit = 0)
+
+method = init$method
+method[c("bmi_new", "bp_systolic_new", "bp_diastolic_new")] = "2l.norm"
+method["age_years"] = "norm"
+method["asian_ethnic_group"] = "polyreg"
+method[c("privins_lookback", "sex")] = "logreg"
+
+pred = init$predictorMatrix
+pred[, "pat_id_int"] = -2                                   # cluster identifier
+pred["pat_id_int", ] = 0
+pred[, "pat_id"] = 0
+pred["pat_id", ] = 0
+pred[, c("diabetes_onset", "surv_no_pheno")] = 0           # no outcome leakage
+
+post = init$post
+post["bmi_new"] = "imp[[j]][imp[[j]] < 12] <- 12"          # floor implausibly low BMI
+```
+
+```{r mice-run}
+mice_result = mice(
+  imputation_data,
+  m = 5, maxit = 20, seed = 123,
+  method = method, predictorMatrix = pred, post = post,
+  printFlag = FALSE
+)
+
+plot(mice_result)                                                    # convergence
+densityplot(mice_result, ~ bmi_new + bp_systolic_new + bp_diastolic_new)
+```
+
+## Imputation checks
+
+Observed vs imputed trajectories for five randomly chosen patients with more than three imputed values. Patients are shown as "Patient 1" to "Patient 5"; no identifiers are printed.
+
+```{r mice-check, message = FALSE, warning = FALSE}
+vars_to_check = c("bmi_new", "bp_systolic_new", "bp_diastolic_new")
+imputed = complete(mice_result, 1)
+
+was_missing = imputation_data %>%
+  select(pat_id, contact_date, all_of(vars_to_check)) %>%
+  mutate(across(all_of(vars_to_check), is.na))
+
+set.seed(8332)
+sample_ids = was_missing %>%
+  group_by(pat_id) %>%
+  summarise(n_imputed = sum(across(all_of(vars_to_check)))) %>%
+  filter(n_imputed > 3) %>%
+  slice_sample(n = 5) %>%
+  mutate(label = paste("Patient", row_number()))
+
+plot_data = imputed %>%
+  inner_join(sample_ids, by = "pat_id") %>%
+  select(label, pat_id, contact_date, all_of(vars_to_check)) %>%
+  pivot_longer(all_of(vars_to_check), names_to = "variable", values_to = "value") %>%
+  left_join(
+    was_missing %>% pivot_longer(all_of(vars_to_check), names_to = "variable", values_to = "imputed"),
+    by = c("pat_id", "contact_date", "variable")
+  ) %>%
+  mutate(contact_date = as.Date(contact_date, origin = "1899-12-30"))
+
+ggplot(plot_data, aes(contact_date, value)) +
+  geom_line(aes(group = label), color = "#1c1c1c", alpha = 0.4) +
+  geom_point(aes(color = imputed, shape = imputed), size = 2) +
+  scale_color_manual(values = c(`FALSE` = "#1c1c1c", `TRUE` = "#c35237"),
+                     labels = c("Observed", "Imputed"), name = NULL) +
+  scale_shape_manual(values = c(`FALSE` = 16, `TRUE` = 17),
+                     labels = c("Observed", "Imputed"), name = NULL) +
+  facet_grid(variable ~ label, scales = "free") +
+  labs(title = "Observed and imputed vitals", x = NULL, y = NULL) +
+  theme_minimal() +
+  theme(legend.position = "bottom", axis.text.x = element_text(angle = 45, hjust = 1))
+
+# Plausibility: imputed values should fall inside the observed range
+sapply(vars_to_check, function(v) {
+  obs = imputation_data[[v]]
+  imp = imputed[[v]][is.na(obs)]
+  c(observed_min = min(obs, na.rm = TRUE), observed_max = max(obs, na.rm = TRUE),
+    imputed_min = min(imp), imputed_max = max(imp))
+})
+```
+
+# Export
+
+The first completed dataset is exported. The visit-level diagnosis label is built in the modelling notebook from `surv_no_pheno`, where post-diagnosis visits are also dropped.
+
+```{r export}
+final_imputed_data = imputed %>%
+  mutate(contact_date = as.Date(contact_date, origin = "1899-12-30"))
+
+write.csv(final_imputed_data, file.path(params$out_dir, "final_imputed_data.csv"))
+```
