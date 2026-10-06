@@ -1,0 +1,126 @@
+{
+  "data": "final_imputed_data_wo_surv.csv",
+  "threshold": 0.1554507315158844,
+  "patient_level": {
+    "roc_auc": 0.7792415169660678,
+    "pr_auc": 0.15666453602008015,
+    "prevalence": 0.05203405865657521,
+    "sensitivity": 0.7454545454545455,
+    "specificity": 0.6946107784431138,
+    "ppv": 0.11815561959654179,
+    "npv": 0.9802816901408451,
+    "confusion": [
+      [
+        696,
+        306
+      ],
+      [
+        14,
+        41
+      ]
+    ]
+  },
+  "visit_level": {
+    "roc_auc": 0.7566878488040315,
+    "pr_auc": 0.05132807160380058,
+    "prevalence": 0.005817643366754055,
+    "n_visits": 9454
+  },
+  "lead_time": {
+    "converters": 55,
+    "flagged": 41,
+    "flagged_before_diagnosis": 26,
+    "median_days": 265.0,
+    "iqr_days": [
+      0.0,
+      493.0
+    ]
+  },
+  "importance": [
+    {
+      "feature": "age_years",
+      "auc_drop": 0.1234,
+      "sd": 0.016
+    },
+    {
+      "feature": "bmi_new",
+      "auc_drop": 0.0313,
+      "sd": 0.0045
+    },
+    {
+      "feature": "asian_subgroup",
+      "auc_drop": 0.0266,
+      "sd": 0.0124
+    },
+    {
+      "feature": "time_since_last_visit",
+      "auc_drop": 0.024,
+      "sd": 0.0038
+    },
+    {
+      "feature": "alcohol_lookback",
+      "auc_drop": 0.0187,
+      "sd": 0.0174
+    },
+    {
+      "feature": "privins_lookback",
+      "auc_drop": 0.0171,
+      "sd": 0.0041
+    },
+    {
+      "feature": "bp_systolic_new",
+      "auc_drop": 0.0072,
+      "sd": 0.0059
+    },
+    {
+      "feature": "sex",
+      "auc_drop": 0.0039,
+      "sd": 0.0012
+    },
+    {
+      "feature": "ischhd_lookback",
+      "auc_drop": 0.0015,
+      "sd": 0.0014
+    },
+    {
+      "feature": "cerebrvasd_lookback",
+      "auc_drop": 0.0005,
+      "sd": 0.0002
+    },
+    {
+      "feature": "tobacco_ever_lookback",
+      "auc_drop": 0.0004,
+      "sd": 0.004
+    },
+    {
+      "feature": "hypertens_lookback",
+      "auc_drop": 0.0003,
+      "sd": 0.0006
+    },
+    {
+      "feature": "heartfail_lookback",
+      "auc_drop": 0.0003,
+      "sd": 0.0011
+    },
+    {
+      "feature": "bp_diastolic_new",
+      "auc_drop": 0.0,
+      "sd": 0.0017
+    },
+    {
+      "feature": "perivd_lookback",
+      "auc_drop": -0.0001,
+      "sd": 0.0001
+    },
+    {
+      "feature": "renald_lookback",
+      "auc_drop": -0.0009,
+      "sd": 0.0008
+    },
+    {
+      "feature": "hld_phenotype_lookback",
+      "auc_drop": -0.0011,
+      "sd": 0.0017
+    }
+  ]
+}
